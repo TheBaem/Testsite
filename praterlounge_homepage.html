@@ -1,0 +1,332 @@
+<?php
+// index.php — PraterLounge Wien (Single-file Frontend + Backend)
+// Simple reservation backend using SQLite. No external dependencies.
+// Place this file on a PHP-enabled host. It will create /data/reservations.sqlite on first run.
+
+// ---------------- Configuration ----------------
+$EMAIL_TO = 'info@praterlounge.at'; // Change to real address if you enable email()
+$TIMEZONE = 'Europe/Vienna';
+$DATA_DIR = __DIR__ . '/data';
+$DB_PATH  = $DATA_DIR . '/reservations.sqlite';
+
+// ---------------- Bootstrap ----------------
+session_start();
+date_default_timezone_set($TIMEZONE);
+if (!is_dir($DATA_DIR)) { @mkdir($DATA_DIR, 0755, true); }
+
+// Initialize DB
+function db() {
+  static $pdo = null;
+  global $DB_PATH;
+  if ($pdo === null) {
+    $pdo = new PDO('sqlite:' . $DB_PATH);
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->exec('CREATE TABLE IF NOT EXISTS reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      date TEXT NOT NULL,
+      time TEXT NOT NULL,
+      persons INTEGER NOT NULL,
+      notes TEXT
+    )');
+  }
+  return $pdo;
+}
+
+// CSRF token
+if (empty($_SESSION['csrf'])) {
+  $_SESSION['csrf'] = bin2hex(random_bytes(32));
+}
+
+// Handle AJAX reservation POST
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'reserve') {
+  header('Content-Type: application/json; charset=utf-8');
+
+  // Basic anti-spam (honeypot)
+  if (!empty($_POST['website'])) {
+    echo json_encode(['ok' => false, 'message' => 'Anfrage abgelehnt.']);
+    exit;
+  }
+
+  // CSRF check
+  if (!hash_equals($_SESSION['csrf'] ?? '', $_POST['csrf'] ?? '')) {
+    echo json_encode(['ok' => false, 'message' => 'Ungültiges Token. Seite neu laden.']);
+    exit;
+  }
+
+  // Collect + validate
+  $name    = trim($_POST['name'] ?? '');
+  $email   = trim($_POST['email'] ?? '');
+  $phone   = trim($_POST['phone'] ?? '');
+  $date    = trim($_POST['date'] ?? '');
+  $time    = trim($_POST['time'] ?? '');
+  $persons = (int)($_POST['persons'] ?? 0);
+  $notes   = trim($_POST['notes'] ?? '');
+
+  if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || $phone === '' || $persons < 1) {
+    echo json_encode(['ok' => false, 'message' => 'Bitte gültige Daten eingeben.']);
+    exit;
+  }
+
+  // Date/time checks
+  try {
+    $dt = new DateTime($date . ' ' . $time, new DateTimeZone($TIMEZONE));
+  } catch (Exception $e) {
+    echo json_encode(['ok' => false, 'message' => 'Ungültiges Datum/Uhrzeit.']);
+    exit;
+  }
+  $now = new DateTime('now', new DateTimeZone($TIMEZONE));
+  if ($dt < $now) {
+    echo json_encode(['ok' => false, 'message' => 'Datum/Uhrzeit liegt in der Vergangenheit.']);
+    exit;
+  }
+
+  // Insert in DB
+  try {
+    $stmt = db()->prepare('INSERT INTO reservations (created_at, name, email, phone, date, time, persons, notes) VALUES (:created_at, :name, :email, :phone, :date, :time, :persons, :notes)');
+    $stmt->execute([
+      ':created_at' => (new DateTime())->format(DateTime::ATOM),
+      ':name' => $name,
+      ':email' => $email,
+      ':phone' => $phone,
+      ':date' => $dt->format('Y-m-d'),
+      ':time' => $dt->format('H:i'),
+      ':persons' => $persons,
+      ':notes' => $notes,
+    ]);
+  } catch (Exception $e) {
+    echo json_encode(['ok' => false, 'message' => 'Speicherfehler.']);
+    exit;
+  }
+
+  // Optional email notification (uncomment if mail() is configured)
+  /*
+  @mail($EMAIL_TO, 'Neue Reservierung – PraterLounge',
+    "Name: $name\nEmail: $email\nTelefon: $phone\nDatum: " . $dt->format('d.m.Y') . "\nUhrzeit: " . $dt->format('H:i') . "\nPersonen: $persons\nNotizen: $notes",
+    'From: noreply@praterlounge.at' . "\r\n" . 'Content-Type: text/plain; charset=UTF-8'
+  );
+  */
+
+  echo json_encode(['ok' => true, 'message' => 'Reservierung eingegangen. Wir bestätigen per E-Mail.']);
+  exit;
+}
+?>
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PraterLounge Wien – Shisha & Drinks</title>
+  <style>
+    :root { --gold:#e0b95b; --bg:#111; --card:#222; }
+    * { box-sizing: border-box; }
+    body {margin:0; font-family: Arial, sans-serif; background:var(--bg); color:#eee;}
+    header {background: rgba(0,0,0,0.8); padding:20px; position:fixed; width:100%; top:0; left:0; z-index:100; display:flex; justify-content:space-between; align-items:center; backdrop-filter: blur(6px);}
+    header h1 {margin:0; font-size:1.5rem; color:var(--gold);}    
+    nav a {color:#eee; margin-left:20px; text-decoration:none; font-weight:500;}
+    nav a:hover {color:var(--gold);}    
+    .hero {height:100vh; background:url('https://source.unsplash.com/1600x900/?shisha,lounge') center/cover no-repeat; display:flex; justify-content:center; align-items:center; text-align:center;}
+    .hero h2 {font-size:3rem; color:#fff; background:rgba(0,0,0,0.6); padding:20px; border-radius:10px;}
+    section {padding:80px 20px; max-width:1100px; margin:auto;}
+    h2 {color:var(--gold); margin-bottom:20px;}
+    .grid {display:grid; grid-template-columns:repeat(auto-fit, minmax(300px,1fr)); gap:20px;}
+    .card {background:var(--card); padding:20px; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.5);}    
+    form {display:grid; gap:15px;}
+    input, textarea, select {padding:12px; border-radius:8px; border:1px solid #333; outline:none; background:#111; color:#eee;}
+    input:focus, textarea:focus, select:focus {border-color:var(--gold);}    
+    button {padding:12px; background:var(--gold); border:none; border-radius:8px; cursor:pointer; font-weight:bold;}
+    button:hover {background:#d4a93a;}
+    .muted { color:#aaa; font-size:0.9rem; }
+    .social a {color:var(--gold); margin:0 10px; font-size:1.2rem; text-decoration:none;}
+    .gallery {display:grid; grid-template-columns:repeat(auto-fit, minmax(250px,1fr)); gap:15px;}
+    .gallery img {width:100%; border-radius:12px;}
+    .status {padding:12px; border-radius:8px; display:none;}
+    .status.ok {display:block; background:#1e3a1e; color:#c6f6c6;}
+    .status.err {display:block; background:#3a1e1e; color:#f6c6c6;}
+    footer {background:#000; color:#aaa; text-align:center; padding:20px; margin-top:40px;}
+  </style>
+</head>
+<body>
+<header>
+  <h1>PraterLounge Wien</h1>
+  <nav>
+    <a href="#about">Über uns</a>
+    <a href="#zeiten">Öffnungszeiten</a>
+    <a href="#reservierung">Reservieren</a>
+    <a href="#galerie">Galerie</a>
+    <a href="#kontakt">Kontakt</a>
+  </nav>
+</header>
+
+<div class="hero">
+  <h2>Exklusive Shisha & Drinks im Herzen von Wien</h2>
+</div>
+
+<section id="about">
+  <h2>Willkommen in der PraterLounge</h2>
+  <p>Die PraterLounge ist der Treffpunkt in Wien für hochwertige Shishas, leckere Drinks und ein stilvolles Ambiente. Egal ob entspannt mit Freunden oder für besondere Anlässe – bei uns bist du richtig.</p>
+</section>
+
+<section id="zeiten">
+  <h2>Öffnungszeiten</h2>
+  <div class="grid">
+    <div class="card">
+      <p><strong>Montag – Donnerstag:</strong> 16:00 – 01:00</p>
+      <p><strong>Freitag – Samstag:</strong> 16:00 – 03:00</p>
+      <p><strong>Sonntag:</strong> 16:00 – 01:00</p>
+      <p class="muted">Letzte Shisha-Bestellung: 60 Min vor Sperrstunde.</p>
+    </div>
+  </div>
+</section>
+
+<section id="reservierung">
+  <h2>Reservierung</h2>
+  <p>Direkte Online-Reservierung – sofortige Bestätigung per E-Mail nach Prüfung.</p>
+  <div class="grid">
+    <div class="card">
+      <form id="reservationForm" method="post" novalidate>
+        <input type="hidden" name="action" value="reserve">
+        <input type="hidden" name="csrf" value="<?php echo htmlspecialchars($_SESSION['csrf']); ?>">
+        <input type="text" name="website" style="display:none"> <!-- Honeypot -->
+
+        <label>
+          <span>Name*</span>
+          <input type="text" name="name" placeholder="Dein Name" required>
+        </label>
+        <label>
+          <span>E-Mail*</span>
+          <input type="email" name="email" placeholder="Deine E-Mail" required>
+        </label>
+        <label>
+          <span>Telefon*</span>
+          <input type="tel" name="phone" placeholder="Telefonnummer" required>
+        </label>
+        <div class="grid">
+          <label>
+            <span>Datum*</span>
+            <input type="date" id="resDate" name="date" required>
+          </label>
+          <label>
+            <span>Uhrzeit*</span>
+            <input type="time" name="time" required>
+          </label>
+          <label>
+            <span>Personen*</span>
+            <select name="persons" required>
+              <option value="">Anzahl Personen</option>
+              <option>1</option>
+              <option>2</option>
+              <option>3</option>
+              <option>4</option>
+              <option>5</option>
+              <option>6</option>
+              <option>7</option>
+              <option>8</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span>Notizen</span>
+          <textarea name="notes" rows="4" placeholder="Anlass, Wünsche, etc."></textarea>
+        </label>
+        <button type="submit">Jetzt reservieren</button>
+        <div id="resStatus" class="status"></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Hinweise</h3>
+      <ul>
+        <li>Reservierungen ab 5 Personen bitte pünktlich kommen.</li>
+        <li>Keine Reservierungen für Minderjährige.</li>
+        <li>Bei Verspätung über 15 Minuten verfällt die Reservierung.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="galerie">
+  <h2>Galerie</h2>
+  <div class="gallery">
+    <img src="https://images.unsplash.com/photo-1544785349-c4a5301826fd?q=80&w=1200&auto=format&fit=crop" alt="PraterLounge Bild 1">
+    <img src="https://images.unsplash.com/photo-1566410872224-01b64d6f88ff?q=80&w=1200&auto=format&fit=crop" alt="PraterLounge Bild 2">
+    <img src="https://images.unsplash.com/photo-1531644028312-9f9b7f1f0f86?q=80&w=1200&auto=format&fit=crop" alt="PraterLounge Bild 3">
+    <img src="https://images.unsplash.com/photo-1551524164-688a9f0deb7b?q=80&w=1200&auto=format&fit=crop" alt="PraterLounge Bild 4">
+  </div>
+</section>
+
+<section id="kontakt">
+  <h2>Kontakt</h2>
+  <div class="grid">
+    <div class="card">
+      <p><strong>Adresse:</strong><br>Praterstraße, 1020 Wien</p>
+      <p><strong>Telefon:</strong><br>+43 123 456 789</p>
+      <p><strong>Email:</strong><br>info@praterlounge.at</p>
+      <h3>Finde uns hier:</h3>
+      <iframe src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d2651.2345!2d16.389!3d48.216!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x476d073b!2sPraterstraße%2C%201020%20Wien!5e0!3m2!1sde!2sat!4v0000000000" width="100%" height="300" style="border:0; border-radius:12px;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+      <div class="social" style="margin-top:12px;">
+        <a href="https://instagram.com/praterlounge" target="_blank" rel="noopener">Instagram</a>
+        <a href="https://facebook.com/praterlounge" target="_blank" rel="noopener">Facebook</a>
+      </div>
+    </div>
+    <div class="card">
+      <form onsubmit="event.preventDefault(); window.location='mailto:info@praterlounge.at'">
+        <input type="text" name="name" placeholder="Dein Name" required>
+        <input type="email" name="email" placeholder="Deine E-Mail" required>
+        <textarea name="message" rows="5" placeholder="Deine Nachricht" required></textarea>
+        <button type="submit">Nachricht senden</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>&copy; 2025 PraterLounge Wien – Alle Rechte vorbehalten.</p>
+  <div class="social">
+    <a href="https://instagram.com/praterlounge" target="_blank" rel="noopener">Instagram</a>
+    <a href="https://facebook.com/praterlounge" target="_blank" rel="noopener">Facebook</a>
+  </div>
+</footer>
+
+<script>
+  // Set min date to today
+  (function(){
+    const d = new Date();
+    const tzOffset = d.getTimezoneOffset(); // ensure local date
+    const today = new Date(d.getTime() - tzOffset*60000).toISOString().slice(0,10);
+    const resDate = document.getElementById('resDate');
+    if (resDate) resDate.min = today;
+  })();
+
+  // AJAX submit
+  const form = document.getElementById('reservationForm');
+  const statusEl = document.getElementById('resStatus');
+  if (form) {
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.className = 'status';
+      statusEl.textContent = 'Sende…';
+      statusEl.style.display = 'block';
+      const fd = new FormData(form);
+      try {
+        const res = await fetch(window.location.href, { method: 'POST', body: fd });
+        const data = await res.json();
+        if (data.ok) {
+          statusEl.className = 'status ok';
+          statusEl.textContent = data.message || 'Reservierung erfolgreich.';
+          form.reset();
+        } else {
+          statusEl.className = 'status err';
+          statusEl.textContent = data.message || 'Fehler bei der Reservierung.';
+        }
+      } catch (err) {
+        statusEl.className = 'status err';
+        statusEl.textContent = 'Serverfehler. Bitte später erneut versuchen.';
+      }
+    });
+  }
+</script>
+</body>
+</html>
